@@ -1,6 +1,21 @@
 name: SwifterSwift
 
 on: 
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches: 
       - master
@@ -8,73 +23,66 @@ on:
     branches: 
       - master
 
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+
+run-name: "SwifterSwift ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
 jobs:
-  Swiftlint:
-    runs-on: macos-15
-    name: SwiftLint
-    steps: 
-      - uses: actions/checkout@v1
-      - name: SwiftLint
-        run: |
-          brew update-reset
-          brew bundle --no-upgrade
-          swiftlint
-
-  CocoaPods:
-    name: CocoaPods
-    runs-on: macos-15
-    strategy:
-      matrix:
-        platform: ['ios', 'macos', 'tvos', 'watchos']
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.0.app/Contents/Developer
-    steps:
-    - uses: actions/checkout@v1
-    - name: Bundle Install
-      run: bundle install
-    - name: CocoaPods ${{ matrix.platform }}
-      run: bundle exec pod lib lint --skip-tests --allow-warnings --verbose --platforms=${{ matrix.platform }} 
-
-  SwiftPM:
-    name: SwiftPM
-    runs-on: macos-15
-    strategy:
-      matrix:
-        platform: ['ios', 'macos', 'tvos', 'watchos']
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.0.app/Contents/Developer
-    steps:
-    - uses: actions/checkout@v1
-    - name: SwiftPM ${{ matrix.platform }}
-      run: |
-        set -euo pipefail
-        case "${{ matrix.platform }}" in
-          ios)
-            xcodebuild clean test -workspace . -scheme SwifterSwift-Package -destination "platform=iOS Simulator,name=iPhone 16,OS=26.2"
-            ;;
-          tvos)
-            xcodebuild clean test -workspace . -scheme SwifterSwift-Package -destination "platform=tvOS Simulator,name=Apple TV"
-            ;;
-          macos)
-            xcodebuild clean test -workspace . -scheme SwifterSwift-Package -destination "platform=OS X"
-            ;;
-          watchos)
-            xcodebuild clean test -workspace . -scheme SwifterSwift-Package -destination "platform=watchOS Simulator,name=Apple Watch Series 10 (42mm)"
-            ;;
-        esac
-      
   Linux:
     runs-on: ubuntu-24.04
     container: swift:6.0.1
     steps:
-      - uses: actions/checkout@v1
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Linux
         run: swift test --parallel
 
   Android:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Run Android Tests
         uses: skiptools/swift-android-action@v2
 
@@ -82,7 +90,31 @@ jobs:
     runs-on: ubuntu-24.04
     container: swift:6.1
     steps:
-      - uses: actions/checkout@v4
+      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+        shell: sh
+        run: |
+          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+          fi
+
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Install Swift SDK for WebAssembly
         run: swift sdk install "https://github.com/swiftwasm/swift/releases/download/swift-wasm-6.1-RELEASE/swift-wasm-6.1-RELEASE-wasm32-unknown-wasi.artifactbundle.zip" --checksum "7550b4c77a55f4b637c376f5d192f297fe185607003a6212ad608276928db992"
       - name: Build for WASM
